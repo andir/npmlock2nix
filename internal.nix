@@ -244,8 +244,8 @@ rec {
     , preInstallLinks ? { } # set that describes which files should be linked in a specific packages folder
     , ...
     }@args:
-      assert (builtins.typeOf preInstallLinks != "set") ->
-        throw "[npmlock2nix] `preInstallLinks` must be an attributeset of attributesets";
+      assert (builtins.typeOf preInstallLinks != "set") -> throw "[npmlock2nix] `preInstallLinks` must be an attributeset of attributesets";
+      assert !(builtins.pathExists packageLockJson) -> throw "[npmlock2nix] the defined `packageLockJson` file doesn't exist. Is your `src` (or `packageLockJson`) attribute pointing to the right place?";
       let
         cleanArgs = builtins.removeAttrs args [ "src" "packageJson" "packageLockJson" "buildInputs" "nativeBuildInputs" "nodejs" "preBuild" "postBuild" "preInstallLinks" ];
         lockfile = readLockfile packageLockJson;
