@@ -295,7 +295,7 @@ rec {
         ];
 
         setupHooks = [
-          ./set-node-path.sh
+          ./set-paths.sh
         ];
 
         preConfigure = ''
