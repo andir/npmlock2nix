@@ -287,7 +287,7 @@ rec {
       in
       stdenv.mkDerivation ({
         inherit (lockfile) version;
-        pname = lockfile.name;
+        pname = makeSafeName lockfile.name;
         inherit buildInputs preBuild postBuild;
 
         src = if filterSource then sourceFilter src else src;
