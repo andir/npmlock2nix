@@ -387,6 +387,9 @@ rec {
         runHook postBuild
       '';
 
-      passthru.node_modules = nm;
+      passthru = {
+        node_modules = nm;
+        inherit (nm) nodejs;
+      };
     } // extraAttrs);
 }
