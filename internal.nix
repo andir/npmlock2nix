@@ -1,11 +1,16 @@
-{ nodejs, stdenv, mkShell, lib, fetchurl, writeText, writeTextFile, runCommand }:
-rec {
+{ nodejs, stdenv, mkShell, lib, fetchurl, writeText, writeTextFile, runCommand, callPackage }:
+let self = rec {
   default_nodejs = nodejs;
+
+  yarn = callPackage ./yarn.nix { internal = self; };
 
   # Description: Replace all "bad" characters (those that aren't allowed in nix paths) with underscores.
   # Type: String -> String
   makeSafeName = name:
-    lib.replaceStrings ["@" "/"] ["_" "_"] name;
+  let
+    badCharacters = ["@" "/" "^" "\"" "," " " "~" "|" ">" "<" "*"];
+  in
+    lib.substring 0 20 (lib.replaceStrings badCharacters (lib.genList (_: "_") (lib.length badCharacters)) name);
 
   # Description: Turns an npm lockfile dependency into an attribute set as needed by fetchurl
   # Type: String -> Set -> Set
@@ -319,7 +324,7 @@ rec {
           declare -pf > $TMP/preinstall-env
           ln -s ${preinstall_node_modules}/node_modules/.hooks/prepare node_modules/.hooks/preinstall
           export HOME=.
-          npm install --offline --nodedir=${nodeSource nodejs}
+          npm install --offline --nodedir=${nodeSource nodejs} < /dev/null
           test -d node_modules/.bin && patchShebangs node_modules/.bin
           rm -rf node_modules/.hooks
           runHook postBuild
@@ -350,7 +355,7 @@ rec {
     }@attrs:
     let
       nm = node_modules (get_node_modules_attrs attrs);
-      extraAttrs = builtins.removeAttrs attrs [ "node_modules_attrs" ];
+      extraAttrs = builtins.removeAttrs attrs [ "node_modules_attrs" "src" ];
     in
     mkShell ({
       buildInputs = [ nm.nodejs nm ];
@@ -366,11 +371,12 @@ rec {
     , buildCommands ? [ "npm run build" ]
     , installPhase
     , node_modules_mode ? "symlink"
+    , node_modules ? null
     , buildInputs ? [ ]
     , ...
     }@attrs:
     let
-      nm = node_modules (get_node_modules_attrs attrs);
+      nm = if node_modules != null then node_modules else self.node_modules (get_node_modules_attrs attrs);
       extraAttrs = builtins.removeAttrs attrs [ "node_modules_attrs" ];
     in
     stdenv.mkDerivation ({
@@ -379,7 +385,7 @@ rec {
       buildInputs = [ nm ] ++ buildInputs;
       inherit src installPhase;
 
-      preConfigure = add_node_modules_to_cwd nm node_modules_mode;
+      preConfigure = (add_node_modules_to_cwd nm node_modules_mode) + (lib.optionalString (nm ? yarn_cache) "cp -rv ${nm.yarn_cache}/yarn .yarn-cache-1000");
 
       buildPhase = ''
         runHook preBuild
@@ -392,4 +398,4 @@ rec {
         inherit (nm) nodejs;
       };
     } // extraAttrs);
-}
+}; in self
