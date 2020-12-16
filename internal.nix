@@ -7,9 +7,9 @@ let self = rec {
   # Description: Replace all "bad" characters (those that aren't allowed in nix paths) with underscores.
   # Type: String -> String
   makeSafeName = name:
-  let
-    badCharacters = ["@" "/" "^" "\"" "," " " "~" "|" ">" "<" "*"];
-  in
+    let
+      badCharacters = [ "@" "/" "^" "\"" "," " " "~" "|" ">" "<" "*" ];
+    in
     lib.substring 0 20 (lib.replaceStrings badCharacters (lib.genList (_: "_") (lib.length badCharacters)) name);
 
   # Description: Turns an npm lockfile dependency into an attribute set as needed by fetchurl
@@ -372,12 +372,14 @@ let self = rec {
     , installPhase
     , node_modules_mode ? "symlink"
     , node_modules ? null
+    , extra_node_modules ? [ ]
     , buildInputs ? [ ]
+    , preConfigure ? null
     , ...
     }@attrs:
     let
       nm = if node_modules != null then node_modules else self.node_modules (get_node_modules_attrs attrs);
-      extraAttrs = builtins.removeAttrs attrs [ "node_modules_attrs" ];
+      extraAttrs = builtins.removeAttrs attrs [ "node_modules_attrs" "preConfigure" ];
     in
     stdenv.mkDerivation ({
       pname = nm.pname;
@@ -385,7 +387,12 @@ let self = rec {
       buildInputs = [ nm ] ++ buildInputs;
       inherit src installPhase;
 
-      preConfigure = (add_node_modules_to_cwd nm node_modules_mode) + (lib.optionalString (nm ? yarn_cache) "cp -rv ${nm.yarn_cache}/yarn .yarn-cache-1000");
+      preConfigure = lib.concatStringsSep "\n" ([ ]
+        ++ (lib.optional (preConfigure != null) preConfigure)
+        ++ [ (add_node_modules_to_cwd nm node_modules_mode) ]
+        ++ (lib.optional (nm ? yarn_cache) "cp -rv ${nm.yarn_cache}/yarn .yarn-cache-1000")
+        ++ (map (nm: "export NODE_PATH=\"$NODE_PATH:${nm}/node_modules\"") extra_node_modules)
+        ++ (map (nm: "export PATH=\"$PATH:${nm}/bin\"") extra_node_modules));
 
       buildPhase = ''
         runHook preBuild

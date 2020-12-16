@@ -58,7 +58,7 @@ let
     in
     ({
       inherit name version resolved;
-    })// (
+    }) // (
       let res = builtins.tryEval integrity; in if res.success then { integrity = res.value; } else { }
     )
 
@@ -105,13 +105,43 @@ let
     in
     map parseBlock (builtins.filter (block: block != "") (splitBlocks content));
 
+  # Description: Takes a string of the format package@org/repo#rev and returns
+  # an attrset with those components extracted. If no match is found null is returned.
+  # Type: String -> Set
+  parseGitHubSource = name:
+    let
+      m = builtins.match "([^@]+)@([^/]+)/([^#]+)#(.+)" name;
+    in
+    if m != null then {
+      package = builtins.elemAt m 0;
+      org = builtins.elemAt m 1;
+      repo = builtins.elemAt m 2;
+      rev = builtins.elemAt m 3;
+    } else null;
+
   patchDep = name: dep:
     let
-      src = internal.makeSource name dep;
+      # yarn points github rev source to the github tarball e.g.:
+      # {
+      #  "dependencies": …,
+      #  "name":"tsec@googleinterns/tsec#7bf4ab23686500522341b977b3e2cc04b1f720b1",
+      #  "resolved":"https://codeload.github.com/googleinterns/tsec/tar.gz/7bf4ab23686500522341b977b3e2cc04b1f720b1",
+      #  "version":"0.0.1"
+      # }
+      # we must take care of these here and can pass all the other cased to the
+      # standard makeSource function. Instead of using the given URL we will
+      # use a git fetcher.
+      parsedGitHubSource = parseGitHubSource dep.name;
     in
-    dep // {
-      inherit (src) resolved;
-    };
+    if parsedGitHubSource == null then dep // { inherit (internal.makeSource name dep) resolved; }
+    else
+      dep // {
+        resolved = "file:/" + (internal.buildTgzFromGitHub {
+          inherit name;
+          inherit (parsedGitHubSource) org repo rev;
+          ref = parsedGitHubSource.rev;
+        });
+      };
 
   patchFile = filePath:
     let
@@ -125,23 +155,31 @@ let
     in
     builtins.replaceStrings searchStrings replaceStrings contents;
 
-    patchShebangs = preInstallLinks: writeShellScriptBin "patchShebangs.sh" ''
+  patchShebangs = preInstallLinks:
+    let
+      preInstallLinkCommands = lib.concatStringsSep "\n"
+        (
+          lib.mapAttrsToList
+            (name: mappings: ''
+              if test -d "$1/${name}"; then
+              ls -la
+              ${lib.concatStringsSep "\n"
+                (lib.mapAttrsToList
+                    (to: from: ''
+                        dirname=$(dirname ${to})
+                        mkdir -p $1/${name}/$dirname
+                        ln -sf ${from} $1/${name}/${to}
+                      '')
+                    mappings
+                )}
+              fi
+            '')
+            preInstallLinks
+        );
+    in
+    writeShellScriptBin "patchShebangs.sh" ''
       set -ex
-      ${lib.concatStringsSep "\n" (
-        lib.mapAttrsToList (name: mappings: ''
-            if test -d "$1/${name}"; then
-            ls -la
-            ${lib.concatStringsSep "\n"
-              (lib.mapAttrsToList (to: from: ''
-                    dirname=$(dirname ${to})
-                    mkdir -p $1/${name}/$dirname
-                    ln -sf ${from} $1/${name}/${to}
-                  '') mappings
-              )}
-            fi
-          '') preInstallLinks
-        )}
-
+      ${preInstallLinkCommands}
 
       if grep -I -q -r '/bin/' "$1"; then
       cat $TMP/preinstall-env
@@ -150,7 +188,7 @@ let
       fi
     '';
 
-  yarnWrapper = {nodejs, yarn, patchShebangs}: writeScriptBin "yarn" ''
+  yarnWrapper = { nodejs, yarn, patchShebangs }: writeScriptBin "yarn" ''
     #!${nodejs}/bin/node
     const { promisify } = require('util')
     const child_process = require('child_process');
@@ -181,7 +219,8 @@ let
     , packageJsonFile ? src + "/package.json"
     , buildInputs ? [ ]
     , nodejs ? default_nodejs
-    , preInstallLinks ? {}
+    , preInstallLinks ? { }
+    , yarnArgs ? ""
     , ...
     }:
     let
@@ -189,7 +228,7 @@ let
       patchedLockfile = writeText "yarn.lock" (patchFile yarnLockFile);
 
       yWrapper = yarnWrapper { inherit nodejs yarn; patchShebangs = patchShebangs preInstallLinks; };
-      extraArgs = builtins.removeAttrs args [ "preInstallLinks" ];
+      extraArgs = builtins.removeAttrs args [ "preInstallLinks" "yarnArgs" ];
 
     in
     stdenv.mkDerivation (extraArgs // {
@@ -220,7 +259,10 @@ let
       buildPhase = ''
         runHook preBuild
         declare -pf > $TMP/preinstall-env
-        yarn install --verbose --offline
+        export PATH="$(pwd)/node_modules/.bin:$PATH"
+        yarn config set nodedir ${internal.nodeSource nodejs}
+        set -x
+        yarn install --verbose --offline ${yarnArgs}
         test -d node_modules/.bin && patchShebangs node_modules/.bin
 
         runHook postBuild
@@ -239,7 +281,7 @@ let
           fi
         fi
 
-        mkdir $yarn_cache
+        mkdir -p $yarn_cache
         test -d $HOME/.cache/yarn && cp -rv $HOME/.cache/yarn $yarn_cache
 
 
