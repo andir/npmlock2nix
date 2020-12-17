@@ -268,17 +268,21 @@ let self = rec {
             #! ${stdenv.shell}
 
             ${lib.concatStringsSep "\n" (
-              lib.mapAttrsToList (name: mappings: ''
-                  if [ "$npm_package_name" == "${name}" ]; then
-                  ${lib.concatStringsSep "\n"
-                    (lib.mapAttrsToList (to: from: ''
-                          dirname=$(dirname ${to})
-                          mkdir -p $dirname
-                          ln -s ${from} ${to}
-                        '') mappings
-                    )}
-                  fi
-                '') preInstallLinks
+              lib.mapAttrsToList
+                  (name: mappings: ''
+                      if [ "$npm_package_name" == "${name}" ]; then
+                      ${lib.concatStringsSep "\n"
+                        (lib.mapAttrsToList
+                              (to: from: ''
+                                    dirname=$(dirname ${to})
+                                    mkdir -p $dirname
+                                    ln -s ${from} ${to}
+                                  '')
+                              mappings
+                        )}
+                      fi
+                    '')
+              preInstallLinks
               )}
 
             if grep -I -q -r '/bin/' .; then
@@ -390,7 +394,7 @@ let self = rec {
       preConfigure = lib.concatStringsSep "\n" ([ ]
         ++ (lib.optional (preConfigure != null) preConfigure)
         ++ [ (add_node_modules_to_cwd nm node_modules_mode) ]
-        ++ (lib.optional (nm ? yarn_cache) "cp -rv ${nm.yarn_cache}/yarn .yarn-cache-1000")
+        ++ (lib.optional (nm ? yarn_cache) "cp -r ${nm.yarn_cache}/yarn .yarn-cache-1000")
         ++ (map (nm: "export NODE_PATH=\"$NODE_PATH:${nm}/node_modules\"") extra_node_modules)
         ++ (map (nm: "export PATH=\"$PATH:${nm}/bin\"") extra_node_modules));
 

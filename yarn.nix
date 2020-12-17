@@ -110,14 +110,33 @@ let
   # Type: String -> Set
   parseGitHubSource = name:
     let
-      m = builtins.match "([^@]+)@([^/]+)/([^#]+)#(.+)" name;
+      m = lib.traceVal (builtins.match "([^@]+)@([^/]+)/([^#]+)#(.+)" name);
+      # twemoji-svg-assets@git+https://github.com/radicle-dev/twemoji-svg-assets.git#v13.0.1
+      m2 = lib.traceVal (builtins.match ".+://github.com/([^/]+)/([^#]+).git#(.+)" name);
     in
     if m != null then {
       package = builtins.elemAt m 0;
       org = builtins.elemAt m 1;
       repo = builtins.elemAt m 2;
       rev = builtins.elemAt m 3;
+    } else if m2 != null then {
+      org = builtins.elemAt m2 0;
+      repo = builtins.elemAt m2 1;
+      rev = builtins.elemAt m2 2;
     } else null;
+
+  # Description: Takes a string of the format package@org/repo#rev and returns
+  # an attrset with those components extracted. If no match is found null is returned.
+  # Type: String -> Set
+  mkGitHubSource = name:
+    let
+      m = parseGitHubSource name;
+    in
+    if m != null then
+      with m;
+      builtins.fetchurl {
+        url = "https://github.com/${org}/${repo}/archive/${rev}.tar.gz";
+      } else null;
 
   patchDep = name: dep:
     let
@@ -129,31 +148,57 @@ let
       #  "version":"0.0.1"
       # }
       # we must take care of these here and can pass all the other cased to the
-      # standard makeSource function. Instead of using the given URL we will
-      # use a git fetcher.
-      parsedGitHubSource = parseGitHubSource dep.name;
+      # standard makeSource function.
+      gitHubSource =
+        let
+          x = mkGitHubSource dep.resolved;
+        in
+        builtins.trace (builtins.toJSON { parsed = x; inherit dep; }) x;
     in
-    if parsedGitHubSource == null then dep // { inherit (internal.makeSource name dep) resolved; }
+    if dep ? integrity then dep // { inherit (internal.makeSource name dep) resolved; }
     else
       dep // {
-        resolved = "file:/" + (internal.buildTgzFromGitHub {
-          inherit name;
-          inherit (parsedGitHubSource) org repo rev;
-          ref = parsedGitHubSource.rev;
-        });
+        name =
+          let
+            parts = builtins.match "(.+)@(.+)" name;
+            packageName = builtins.elemAt parts 0;
+            sourceSpec = builtins.elemAt parts 1;
+          in
+          packageName + "@" + (builtins.hashString "sha256" sourceSpec);
+        resolved = "file:/" + gitHubSource;
       };
 
-  patchFile = filePath:
+  patchLockfile = filePath:
     let
       parsedFile = parseFile filePath;
       patchedDeps = builtins.listToAttrs (map (x: lib.nameValuePair x.name (patchDep x.name x)) parsedFile);
 
-      searchStrings = map (x: x.resolved) parsedFile;
-      replaceStrings = map (x: patchedDeps.${x.name}.resolved) parsedFile;
+      searchResolveStrings = map (x: x.resolved) parsedFile;
+      replaceResolveStrings = map (x: patchedDeps.${x.name}.resolved) parsedFile;
+
+      updatedNames = builtins.filter (x: x.name != patchedDeps.${x.name}.name) parsedFile;
+      oldNames = map (x: x.name) updatedNames;
+      newNames = map (x: patchedDeps.${x.name}.name) updatedNames;
 
       contents = builtins.readFile filePath;
     in
-    builtins.replaceStrings searchStrings replaceStrings contents;
+    builtins.replaceStrings (searchResolveStrings ++ oldNames) (replaceResolveStrings ++ newNames) contents;
+
+  patchPackageJson = filePath:
+    let
+      json = builtins.fromJSON (builtins.readFile filePath);
+    in
+    builtins.toJSON (json // {
+      dependencies =
+        lib.mapAttrs'
+          (name: value:
+            let
+              m = builtins.match "git(.+)" value;
+              newValue = if m != null then builtins.hashString "sha256" value else value;
+            in
+            lib.nameValuePair name newValue)
+          json.dependencies;
+    });
 
   patchShebangs = preInstallLinks:
     let
@@ -225,7 +270,8 @@ let
     }:
     let
       packageJson = builtins.fromJSON (builtins.readFile packageJsonFile);
-      patchedLockfile = writeText "yarn.lock" (patchFile yarnLockFile);
+      patchedLockfile = writeText "yarn.lock" (patchLockfile yarnLockFile);
+      patchedPackageJson = writeText "package.json" (patchPackageJson packageJsonFile);
 
       yWrapper = yarnWrapper { inherit nodejs yarn; patchShebangs = patchShebangs preInstallLinks; };
       extraArgs = builtins.removeAttrs args [ "preInstallLinks" "yarnArgs" ];
@@ -254,6 +300,7 @@ let
 
       postPatch = ''
         ln -sf ${patchedLockfile} yarn.lock
+        ln -sf ${patchedPackageJson} package.json
       '';
 
       buildPhase = ''
@@ -289,8 +336,9 @@ let
       '';
 
       passthru.nodejs = nodejs;
+      passthru.yarn = yWrapper;
     });
 in
 {
-  inherit splitBlocks parseBlock unquote parseFile patchFile patchDep node_modules;
+  inherit splitBlocks parseBlock unquote parseFile patchLockfile patchDep node_modules;
 }
